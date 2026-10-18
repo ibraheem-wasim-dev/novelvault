@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = ["crates/novelvault-core", "crates/novelvault-cli"]
+# The Tauri shell builds on its own (it needs OS web-view libraries the core must not require).
+exclude = ["src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+# Smaller, faster dev builds: this project is verified by `cargo test`, not by a debugger.
+[profile.dev]
+debug = 0
+incremental = true

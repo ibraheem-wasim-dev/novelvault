@@ -1,0 +1,148 @@
+# The repository root is the folder that contains Cargo.toml and package.json (this project's
+# top-level folder). GitHub only reads workflows from <repo-root>/.github/workflows/.
+#
+# What this does, in order:
+#   core-tests          Rust engine tests + every CLI walkthrough (including the Reader) on Linux
+#   core-tests-windows  the same engine tests on Windows (watcher + path handling); reported, but a
+#                       Windows-only test quirk does not stop you getting an installer
+#   frontend            TypeScript typecheck + production build of the UI
+#   installers          the real desktop installers: Windows (.exe NSIS + .msi), macOS (.dmg),
+#                       Linux (.AppImage/.deb/.rpm). An empty build FAILS instead of passing silently.
+#   release             on a version tag (v1.2.3), attaches the installers to a GitHub Release
+#
+# Run it by hand any time: Actions tab -> build -> Run workflow.
+name: build
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  core-tests:
+    name: core tests + walkthroughs (linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # --locked: the committed Cargo.lock is what gets built, so CI cannot drift from your machine.
+      - run: cargo build --locked -p novelvault-core -p novelvault-cli
+      - run: cargo test --locked -p novelvault-core -- --nocapture
+      # The walkthroughs assert their own results and exit non-zero on failure.
+      - name: CLI walkthroughs
+        run: |
+          bash scripts/demo.sh
+          bash scripts/phase3-demo.sh
+          bash scripts/phase4-demo.sh
+          bash scripts/phase5-demo.sh
+
+  core-tests-windows:
+    name: core tests (windows)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    # Windows has not been validated by the author yet; show the result without blocking installers.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # --no-fail-fast: run every test file even if one fails, so a single Windows quirk shows all of them.
+      - run: cargo test --locked --no-fail-fast -p novelvault-core -- --nocapture
+      - run: cargo build --locked -p novelvault-cli
+
+  frontend:
+    name: frontend typecheck + build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+
+  installers:
+    name: installer (${{ matrix.os }})
+    needs: [core-tests, frontend]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-22.04]
+    env:
+      # AppImage tooling runs without FUSE on hosted runners.
+      APPIMAGE_EXTRACT_AND_RUN: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Linux system dependencies
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev patchelf
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      # Produces the real installer: on Windows a single NovelVault_*_x64-setup.exe
+      # (NSIS, per-user, no admin rights) plus an .msi.
+      - run: npm run app:build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: novelvault-${{ matrix.os }}
+          path: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/dmg/*.dmg
+            src-tauri/target/release/bundle/appimage/*.AppImage
+            src-tauri/target/release/bundle/deb/*.deb
+            src-tauri/target/release/bundle/rpm/*.rpm
+          # A green run with no installer in it would be a lie.
+          if-no-files-found: error
+
+  release:
+    name: attach installers to the release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [installers]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: installers
+          pattern: novelvault-*
+          merge-multiple: true
+      - run: ls -R installers
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: installers/*
+          generate_release_notes: true

@@ -1,0 +1,13 @@
+[package]
+name = "novelvault-cli"
+description = "NovelVault V1 command line — the same core the desktop app uses, with no UI."
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "novelvault"
+path = "src/main.rs"
+
+[dependencies]
+novelvault-core = { path = "../novelvault-core" }
+serde_json = "1"
